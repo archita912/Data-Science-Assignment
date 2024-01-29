@@ -1,0 +1,79 @@
+import feedparser
+from sqlalchemy import create_engine, Column, String, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from celery import Celery
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+
+# Initialize Celery
+app = Celery('news_processing', broker='pyamqp://guest:guest@localhost//')
+
+# Initialize database
+Base = declarative_base()
+engine = create_engine('postgresql://your_username:your_password@localhost/your_database')
+Session = sessionmaker(bind=engine)
+
+# Database model
+class NewsArticle(Base):
+    _tablename_ = 'news'
+    id = Column(String, primary_key=True)
+    title = Column(String)
+    content = Column(String)
+    publication_date = Column(DateTime)
+    source_url = Column(String)
+    category = Column(String)
+
+# Function to preprocess text
+def preprocess_text(text):
+    stop_words = set(stopwords.words('english'))
+    porter_stemmer = PorterStemmer()
+
+    tokens = word_tokenize(text)
+    tokens = [porter_stemmer.stem(word) for word in tokens if word.lower() not in stop_words]
+
+    return ' '.join(tokens)
+
+# Celery task for asynchronous processing
+@app.task
+def process_articles(articles):
+    session = Session()
+
+    for article in articles:
+        # Check for duplicate articles based on title and source URL
+        existing_article = session.query(NewsArticle).filter_by(title=article.title, source_url=article.link).first()
+
+        if not existing_article:
+            category = categorize_article_nltk(preprocess_text(article.title + ' ' + article.summary))
+            new_article = NewsArticle(
+                id=generate_unique_id(),  # You need to implement this function
+                title=article.title,
+                content=article.summary,
+                publication_date=article.published,
+                source_url=article.link,
+                category=category
+            )
+            session.add(new_article)
+
+    session.commit()
+    session.close()
+
+# RSS feed URLs
+rss_feeds = [
+    'http://rss.cnn.com/rss/cnn_topstories.rss',
+    'http://qz.com/feed',
+    'http://feeds.foxnews.com/foxnews/politics',
+    'http://feeds.reuters.com/reuters/businessNews',
+    'http://feeds.feedburner.com/NewshourWorld',
+    'https://feeds.bbci.co.uk/news/world/asia/india/rss.xml'
+]
+
+# Fetch articles from RSS feeds
+all_articles = []
+for feed_url in rss_feeds:
+    articles = feedparser.parse(feed_url).entries
+    all_articles.extend(articles)
+
+# Send articles to Celery task queue for asynchronous processing
+process_articles.delay(all_articles)
